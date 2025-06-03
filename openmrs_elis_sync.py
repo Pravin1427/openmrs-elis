@@ -4,7 +4,7 @@ import base64
 import logging
 from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class OpenMRSIntegration:
     def __init__(self, base_url, username, password):
@@ -228,53 +228,89 @@ class PatientMiddleware:
 
         openmrs_person = openmrs_patient_response.get('person', {})
         
-        # Correctly extract preferred name details
-        preferred_name = openmrs_person.get('preferredName', {})
-        first_name = preferred_name.get('givenName', '')
-        last_name = preferred_name.get('familyName', '')
+        # --- MODIFIED NAME EXTRACTION LOGIC ---
+        preferred_name_display = openmrs_person.get('preferredName', {}).get('display', '')
+        
+        # Attempt to split the display name. This assumes "givenName [middleName] familyName"
+        name_parts = preferred_name_display.split(' ')
+        
+        first_name = ""
+        last_name = ""
+        
+        if len(name_parts) >= 2:
+            first_name = name_parts[0]
+            last_name = name_parts[-1] # Last part is family name
+            # If there's a middle name, it would be name_parts[1] if len is 3
+        elif len(name_parts) == 1:
+            first_name = name_parts[0] # Assume the single part is first name
+        # --- END MODIFIED NAME EXTRACTION LOGIC ---
+        
+        logging.info(f"Parsed OpenMRS first name: '{first_name}'")
+        logging.info(f"Parsed OpenMRS last name: '{last_name}'")
 
         # Correctly extract patient identifier
         openmrs_patient_id = ""
         identifiers_list = openmrs_patient_response.get('identifiers', [])
         if identifiers_list:
-            # The identifier itself is within the 'display' field, like "OpenMRS ID = 100036F"
-            # We need to parse it out
             identifier_display = identifiers_list[0].get('display', '')
             if ' = ' in identifier_display:
                 openmrs_patient_id = identifier_display.split(' = ')[1].strip()
             else: # Fallback if format is just the ID
                 openmrs_patient_id = identifier_display.strip()
             
-        openmrs_addresses_list = openmrs_person.get('addresses', [])
-        openmrs_addresses = openmrs_addresses_list[0] if openmrs_addresses_list else {}
+        logging.info(f"Parsed OpenMRS Patient ID: '{openmrs_patient_id}'") # Add this for ID verification
 
+        openmrs_addresses_list = openmrs_person.get('addresses', [])
+        # Your previous code was getting addresses[0] directly, but the debug showed it was empty.
+        # Let's adjust this to correctly get the preferredAddress object from the response.
+        openmrs_addresses = openmrs_person.get('preferredAddress', {})
+        
+        logging.debug(f"Extracted OpenMRS addresses: {json.dumps(openmrs_addresses, indent=2)}") # Debug addresses
+        
         openmrs_attributes = openmrs_person.get('attributes', [])
+        logging.debug(f"Extracted OpenMRS attributes: {json.dumps(openmrs_attributes, indent=2)}") # Debug attributes
+
 
         phone_number = ""
+        # The 'attributeType' was present in the response for attributes,
+        # but the actual phone number was in 'display' as '555-123-4567'.
+        # Let's adjust to get the value from 'display' if 'attributeType' isn't directly giving it.
+        # Or even better, check the 'value' field which is part of the original payload.
+        # Based on your OpenMRS creation payload:
+        # { "attributeType": "...", "value": "555-123-4567" }
+        # The response shows: { "uuid": "...", "display": "555-123-4567", ... }
+        # The initial extraction logic should still work if 'value' is returned.
+        # Let's stick with the original `attr.get('value')` first, as it's cleaner.
+        # If 'value' is still empty, then we'd parse from 'display'.
         for attr in openmrs_attributes:
-            if attr.get('attributeType', {}).get('uuid') == "14d4f066-15f5-102d-96e4-000c29c2a5d7" or \
-               attr.get('attributeType', {}).get('display') == "Telephone Number":
-                phone_number = attr.get('value', '')
+            # Check for the UUID first, it's more reliable than display name
+            if attr.get('attributeType', {}).get('uuid') == "14d4f066-15f5-102d-96e4-000c29c2a5d7":
+                phone_number = attr.get('value', '') # This was causing the issue as 'value' might not be in response
+                if not phone_number: # Fallback to display if 'value' isn't directly present
+                    phone_number = attr.get('display', '').split(' ')[0] # Assuming display is just the number
                 break
+        logging.info(f"Parsed OpenMRS phone number: '{phone_number}'") # Add this for phone verification
         
         birthdate_openmrs = openmrs_person.get('birthdate', '')
         birthdate_elis = ""
         if birthdate_openmrs:
             try:
                 if 'T' in birthdate_openmrs:
-                    dt_object = datetime.fromisoformat(birthdate_openmrs.replace('Z', '+00:00'))
+                    # fromisoformat handles 'Z' by converting to UTC
+                    dt_object = datetime.fromisoformat(birthdate_openmrs.replace('Z', '+00:00')) 
                 else:
                     dt_object = datetime.strptime(birthdate_openmrs, "%Y-%m-%d")
                 birthdate_elis = dt_object.strftime("%d/%m/%Y")
             except ValueError:
                 logging.warning(f"Could not parse OpenMRS birthdate: {birthdate_openmrs}. Using empty string for OpenELIS.")
+        logging.info(f"Parsed OpenMRS birthdate for ELIS: '{birthdate_elis}'") # Add this for birthdate verification
 
         openelis_patient_payload = {
             "patientUpdateStatus": "ADD",
             "nationalId": openmrs_patient_id,
             "subjectNumber": openmrs_patient_id,
-            "lastName": last_name,
-            "firstName": first_name,
+            "lastName": last_name, # Now should be populated
+            "firstName": first_name, # Now should be populated
             "gender": openmrs_person.get('gender', ''),
             "birthDateForDisplay": birthdate_elis,
             "primaryPhone": phone_number,
@@ -289,14 +325,14 @@ class PatientMiddleware:
             "otherNationality": "", 
             "patientContact": { 
                 "person": {
-                    "firstName": "",
+                    "firstName": "", 
                     "lastName": "",
                     "primaryPhone": "",
                     "email": ""
                 }
             }
         }
-        logging.info(f"Transformed patient data for OpenELIS: {openelis_patient_payload}")
+        logging.info(f"Transformed patient data for OpenELIS: {json.dumps(openelis_patient_payload, indent=2)}")
 
         if self.openelis.create_openelis_patient(openelis_patient_payload):
             logging.info("Patient successfully synchronized to OpenELIS.")
@@ -340,13 +376,13 @@ def main():
         "person": {
             "names": [
                 {
-                    "givenName": "sedan",
-                    "middleName": "medan",
-                    "familyName": "bedan"
+                    "givenName": "Bennet",
+                    "middleName": "Chennet",
+                    "familyName": "Mennet"
                 }
             ],
             "gender": "M",
-            "birthdate": "1996-11-25",
+            "birthdate": "1986-12-25",
             "birthdateEstimated": False,
             "dead": False,
             "addresses": [
