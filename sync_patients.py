@@ -88,14 +88,32 @@ class OpenMRSIntegration:
             return None
 
     def get_syncer_records(self):
-        logging.info("Fetching syncer records from OpenMRS syncerrecord endpoint...")
+        logging.info("Fetching syncer records from OpenMRS syncerrecord endpoint with pagination support...")
         headers = self._get_auth_header()
+
+        records = []
+        next_url = f"{self.base_url}/ws/rest/v1/syncerrecord"
+
         try:
-            response = self.session.get(f"{self.base_url}/ws/rest/v1/syncerrecord", headers=headers, verify=False)
-            response.raise_for_status()
-            syncer_data = response.json()
-            logging.info(f"Successfully fetched {len(syncer_data.get('results', []))} syncer records.")
-            return syncer_data.get('results', [])
+            while next_url:
+                response = self.session.get(next_url, headers=headers, verify=False)
+                response.raise_for_status()
+            
+                syncer_data = response.json()
+                page_results = syncer_data.get('results', [])
+                records.extend(page_results)
+                logging.info(f"Fetched {len(page_results)} records. Total so far: {len(records)}")
+            
+                # Check for next link
+                next_url = None
+                links = syncer_data.get('links', [])
+                for link in links:
+                    if link.get('rel') == 'next':
+                        next_url = link.get('uri')
+                        break
+                    
+            logging.info(f"Completed fetching all syncer records. Total count: {len(records)}")
+            return records
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to fetch syncer records: {e}")
             return []
